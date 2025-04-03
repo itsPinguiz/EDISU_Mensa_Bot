@@ -4,6 +4,12 @@ import sys
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 
+# Get log level from environment variable
+def get_log_level():
+    """Get log level from environment variable or use default"""
+    level_name = os.environ.get("POLITOMENSA_LOG_LEVEL", "INFO").upper()
+    return getattr(logging, level_name, logging.INFO)
+
 def setup_logger(name="PolitoMensa", log_to_file=True):
     """
     Set up and configure the logger
@@ -17,7 +23,7 @@ def setup_logger(name="PolitoMensa", log_to_file=True):
     """
     # Create logger
     logger = logging.getLogger(name)
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.DEBUG)  # Always collect all logs at the logger level
     
     # Create formatter
     formatter = logging.Formatter(
@@ -25,9 +31,9 @@ def setup_logger(name="PolitoMensa", log_to_file=True):
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     
-    # Create console handler with a higher log level (INFO instead of DEBUG)
+    # Create console handler with level from environment variable
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)  # Only show INFO and above in console
+    console_handler.setLevel(get_log_level())  # Use environment variable or default
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
     
