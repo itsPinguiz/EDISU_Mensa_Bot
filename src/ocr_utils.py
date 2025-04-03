@@ -32,8 +32,13 @@ def configure_tesseract():
         logger.warning("Could not find Tesseract executable in common locations")
         return False
     else:
-        # On Linux/Mac, pytesseract should find it if it's in PATH
-        logger.debug("Non-Windows OS detected, relying on system PATH for Tesseract")
+        # Check for PythonAnywhere environment
+        if "PYTHONANYWHERE_SITE" in os.environ:
+            pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+            logger.info("PythonAnywhere environment detected, using system Tesseract")
+        else:
+            # On Linux/Mac, pytesseract should find it if it's in PATH
+            logger.debug("Non-Windows OS detected, relying on system PATH for Tesseract")
         return True
 
 # Try to configure Tesseract path on module import

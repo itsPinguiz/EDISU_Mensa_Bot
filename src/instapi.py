@@ -185,7 +185,16 @@ class InstApi:
             self.logger.debug("Tesseract OCR is available")
             return True
         except Exception as e:
-            self.logger.warning(f"Tesseract OCR is not available: {str(e)}")
+            # Check if we're on PythonAnywhere
+            if "PYTHONANYWHERE_SITE" in os.environ:
+                self.logger.info("Running on PythonAnywhere, will use cloud OCR service")
+                # Check if cloud OCR is configured
+                if os.environ.get("OCR_API_KEY"):
+                    return False  # We'll use cloud OCR
+                else:
+                    self.logger.warning("Cloud OCR API key not configured")
+            else:
+                self.logger.warning(f"Tesseract OCR is not available: {str(e)}")
             return False
     
     def _extract_menus_from_stories(self, stories) -> Dict[str, Dict[str, str]]:
@@ -257,34 +266,28 @@ class InstApi:
         return "pranzo"
     
     def _extract_text_from_story(self, story) -> str:
-        """
-        Extract text from a story image using OCR
-        """
-        # First check if Tesseract is available
-        if not self._check_tesseract():
-            return ""
-            
+        """Extract text from a story image using OCR"""
+        # Check if Tesseract is available
+        tesseract_available = self._check_tesseract()
+        
         try:
-            # Get the story URL
+            # Get the story image
             if hasattr(story, 'thumbnail_url') and story.thumbnail_url:
                 media_url = story.thumbnail_url
             elif hasattr(story, 'media_urls') and story.media_urls:
                 media_url = story.media_urls[0]
             else:
-                # If the story object is from instagrapi, we need to download it
                 self.logger.debug("Downloading story media using instagrapi")
                 story_path = self.client.story_download(story.pk)
                 if story_path:
                     with open(story_path, 'rb') as f:
                         image = Image.open(io.BytesIO(f.read()))
-                    # Clean up the downloaded file
                     if os.path.exists(story_path):
                         os.remove(story_path)
                 else:
                     self.logger.error(f"Failed to download story {story.pk}")
                     return ""
             
-            # If we have a URL, download the image
             if 'media_url' in locals():
                 self.logger.debug(f"Downloading image from URL: {media_url}")
                 response = requests.get(media_url)
@@ -294,9 +297,14 @@ class InstApi:
                     self.logger.error(f"Failed to download image: {response.status_code}")
                     return ""
             
-            # Process the image with pytesseract
-            self.logger.debug("Running OCR on story image")
-            text = pytesseract.image_to_string(image, lang='ita')
+            if tesseract_available:
+                self.logger.debug("Running OCR with Tesseract")
+                text = pytesseract.image_to_string(image, lang='ita')
+            else:
+                self.logger.debug("Running OCR with cloud service")
+                from src.cloud_ocr import extract_text_from_image_cloud
+                text = extract_text_from_image_cloud(image)
+            
             self.logger.debug(f"OCR extracted {len(text)} characters")
             return text
         except Exception as e:
