@@ -9,3 +9,4 @@ python-dotenv==1.0.0
 keyring==24.2.0
 opencv-python==4.9.0.80
 numpy==1.26.4
+windows-curses; platform_system=="Windows"

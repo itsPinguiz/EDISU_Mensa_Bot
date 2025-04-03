@@ -1,6 +1,8 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonCommands
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+import telegram.error
 import asyncio
+import time
 from src.logger import get_logger
 from src.credentials import get_telegram_token
 
@@ -16,6 +18,9 @@ class Telebot:
         
         # Track debug mode (default: False)
         self.debug_mode = False
+        
+        # Keep track of active chat IDs to avoid connection pool issues
+        self.active_chats = set()
         
         # Register handlers
         self._register_handlers()
@@ -158,6 +163,11 @@ class Telebot:
         user = update.effective_user
         self.logger.info(f"Start command received from user {user.id} ({user.username})")
         
+        # Add this chat to active chats
+        if update.message and update.message.chat:
+            self.active_chats.add(update.message.chat.id)
+            self.logger.debug(f"Added chat {update.message.chat.id} to active chats (now {len(self.active_chats)})")
+        
         welcome_text = (
             "Benvenuto nel Bot Mensa EDISU Torino!\n\n"
             "Questo bot ti permette di consultare i menù delle mense "
@@ -196,6 +206,11 @@ class Telebot:
         
         # Always answer the callback query to stop the loading animation
         await query.answer()
+        
+        # Add this chat to active chats
+        if query.message and query.message.chat:
+            self.active_chats.add(query.message.chat.id)
+            self.logger.debug(f"Added chat {query.message.chat.id} to active chats (now {len(self.active_chats)})")
         
         self.logger.info(f"Button click from user {user.id} ({user.username}): {callback_data}")
         
@@ -321,11 +336,18 @@ class Telebot:
             "Dopo aver scelto pranzo o cena, potrai selezionare la mensa specifica."
         )
         
-        await query.edit_message_text(
-            help_text,
-            reply_markup=self._get_main_keyboard(),
-            parse_mode="Markdown"
-        )
+        try:
+            await query.edit_message_text(
+                help_text,
+                reply_markup=self._get_main_keyboard(),
+                parse_mode="Markdown"
+            )
+        except telegram.error.BadRequest as e:
+            # Ignore "message is not modified" errors
+            if "message is not modified" not in str(e).lower():
+                # Only re-raise if it's a different error
+                self.logger.warning(f"Error showing help: {str(e)}")
+                raise
     
     async def _show_credits(self, query):
         """Show credits information"""
@@ -338,18 +360,28 @@ class Telebot:
             "© 2025 - All Rights Reserved"
         )
         
-        await query.edit_message_text(
-            credits_text,
-            reply_markup=self._get_back_keyboard(),
-            parse_mode="Markdown"
-        )
+        try:
+            await query.edit_message_text(
+                credits_text,
+                reply_markup=self._get_back_keyboard(),
+                parse_mode="Markdown"
+            )
+        except telegram.error.BadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                self.logger.warning(f"Error showing credits: {str(e)}")
+                raise
     
     async def _back_to_main_menu(self, query):
         """Return to main menu"""
-        await query.edit_message_text(
-            "Menu principale del Bot Mensa EDISU Torino.\nSeleziona un'opzione:",
-            reply_markup=self._get_main_keyboard()
-        )
+        try:
+            await query.edit_message_text(
+                "Menu principale del Bot Mensa EDISU Torino.\nSeleziona un'opzione:",
+                reply_markup=self._get_main_keyboard()
+            )
+        except telegram.error.BadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                self.logger.warning(f"Error returning to main menu: {str(e)}")
+                raise
     
     async def _setup_menu_button(self):
         """Configure the bot's menu button to show commands"""
@@ -384,6 +416,9 @@ class Telebot:
                 elif update.callback_query and update.callback_query.message.chat:
                     chat_ids.add(update.callback_query.message.chat.id)
             
+            # Store these chats as active
+            self.active_chats.update(chat_ids)
+            
             # Send restart notification to each chat
             restart_message = "🔄 *Bot riavviato*\nTutti i menu sono stati reimpostati. Usa i pulsanti qui sotto per ricominciare."
             for chat_id in chat_ids:
@@ -401,6 +436,60 @@ class Telebot:
             self.logger.info(f"Sent restart notifications to {len(chat_ids)} chats")
         except Exception as e:
             self.logger.error(f"Error clearing chat history: {str(e)}")
+
+    def send_notification(self, message: str) -> int:
+        """
+        Send a notification message to all active chats
+        
+        Args:
+            message: The message text to send
+            
+        Returns:
+            int: Number of chats the message was sent to
+        """
+        self.logger.info(f"Sending notification to all active chats: {message}")
+        
+        # Use tracked active chats
+        chat_ids = self.active_chats
+        
+        if not chat_ids:
+            self.logger.warning("No active chats found for sending notification")
+            return 0
+        
+        # Use requests library for a truly synchronous implementation
+        import requests
+        from telegram.constants import ParseMode
+        
+        # Telegram Bot API endpoint for sending messages
+        api_url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+        
+        success_count = 0
+        for chat_id in chat_ids:
+            try:
+                # Prepare message payload
+                payload = {
+                    "chat_id": chat_id,
+                    "text": f"📣 *NOTIFICATION*\n\n{message}",
+                    "parse_mode": ParseMode.MARKDOWN.value
+                }
+                
+                # Make a synchronous HTTP POST request
+                response = requests.post(api_url, json=payload)
+                
+                # Check if request was successful
+                if response.status_code == 200 and response.json().get("ok"):
+                    success_count += 1
+                    self.logger.info(f"Sent notification to chat {chat_id}")
+                else:
+                    self.logger.warning(f"Failed to send notification to chat {chat_id}: {response.text}")
+                
+                # Add a small delay between messages to avoid rate limiting
+                time.sleep(0.1)
+            except Exception as e:
+                self.logger.warning(f"Could not send notification to chat {chat_id}: {str(e)}")
+        
+        self.logger.info(f"Sent notification to {success_count} out of {len(chat_ids)} chats")
+        return success_count
 
     def run(self, debug=False):
         """Start the bot."""
@@ -460,3 +549,4 @@ class Telebot:
             self.logger.info("Bot stopped by user (KeyboardInterrupt)")
         except Exception as e:
             self.logger.error(f"Bot stopped due to error: {str(e)}", exc_info=True)
+
