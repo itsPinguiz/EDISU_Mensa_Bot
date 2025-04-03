@@ -59,41 +59,8 @@ This application requires Tesseract OCR to extract menu text from Instagram stor
 
 The bot uses an interactive button-based interface with the following options:
 
+- **Menù Pranzo** - View lunch menus for available cafeterias
+- **Menù Cena** - View dinner menus for available cafeterias
 - **Tutti i menù** - View menus for all cafeterias
-- **Central** - View menu for Central cafeteria
-- **Castelfidardo** - View menu for Castelfidardo cafeteria
-- **Sobrero** - View menu for Sobrero cafeteria
-- **Corso Duca** - View menu for Corso Duca cafeteria
 - **Aggiorna menù** - Force update of today's menus
 - **Aiuto** - Show help information
-
-## Troubleshooting
-
-### OCR Issues
-
-If you experience OCR issues:
-
-1. Verify Tesseract is correctly installed: run `tesseract --version` in your terminal
-2. Ensure the Italian language pack is installed
-3. Check the logs for specific errors
-
-### Instagram API Issues
-
-If you see JSONDecodeError messages in the logs:
-
-1. This is often due to Instagram's rate limiting or API changes
-2. The application will attempt to use alternative methods to fetch stories
-3. If problems persist, try again later or consider refreshing your Instagram session:
-   ```
-   python -c "from src.credentials import set_instagram_credentials; set_instagram_credentials()"
-   ```
-
-### Bot Connection Issues
-
-1. Verify your Telegram token is correct
-2. Ensure your internet connection is working
-3. Check the logs for API errors
-
-## License
-
-MIT
