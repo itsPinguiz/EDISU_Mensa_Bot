@@ -14,6 +14,9 @@ class Telebot:
         self.logger.debug("Building Telegram application")
         self.application = ApplicationBuilder().token(self.token).build()
         
+        # Track debug mode (default: False)
+        self.debug_mode = False
+        
         # Register handlers
         self._register_handlers()
     
@@ -80,20 +83,23 @@ class Telebot:
         
         meal_buttons = []
         if self._is_meal_type_available("pranzo"):
-            meal_buttons.append(InlineKeyboardButton("🥄 Menù Pranzo", callback_data="meal_pranzo"))
+            meal_buttons.append(InlineKeyboardButton("☀️ Menù Pranzo", callback_data="meal_pranzo"))
         if self._is_meal_type_available("cena"):
-            meal_buttons.append(InlineKeyboardButton("🍽️ Menù Cena", callback_data="meal_cena"))
+            meal_buttons.append(InlineKeyboardButton("🌒 Menù Cena", callback_data="meal_cena"))
         
         if meal_buttons:
             keyboard.append(meal_buttons)
         
-        # Always show these options
-        keyboard.append([
-            InlineKeyboardButton("📋 Tutti i menù", callback_data="all_menus"),
-            InlineKeyboardButton("🔄 Aggiorna menù", callback_data="update_menus"),
-        ])
+        # Only show update button in debug mode
+        if self.debug_mode:
+            keyboard.append([
+                InlineKeyboardButton("🔄 Aggiorna menù [DEBUG]", callback_data="update_menus"),
+            ])
+        
+        # Always show help and credits
         keyboard.append([
             InlineKeyboardButton("❓ Aiuto", callback_data="help"),
+            InlineKeyboardButton("ℹ️ Credits", callback_data="credits"),
         ])
         
         return InlineKeyboardMarkup(keyboard)
@@ -172,7 +178,6 @@ class Telebot:
             "Usa i pulsanti qui sotto per interagire con il bot:\n\n"
             "• *Menù Pranzo* - Visualizza i menù di pranzo\n"
             "• *Menù Cena* - Visualizza i menù di cena\n"
-            "• *Tutti i menù* - Visualizza tutti i menù disponibili\n"
             "• *Aggiorna menù* - Forza l'aggiornamento dei menù odierni\n\n"
             "Dopo aver scelto pranzo o cena, potrai selezionare la mensa specifica."
         )
@@ -198,12 +203,12 @@ class Telebot:
             # User selected a meal type (pranzo/cena)
             meal_type = callback_data[5:]  # Remove "meal_" prefix
             await self._show_cafeteria_selection(query, meal_type)
-        elif callback_data == "all_menus":
-            await self._show_all_menus(query)
         elif callback_data == "update_menus":
             await self._update_menus(query)
         elif callback_data == "help":
             await self._show_help(query)
+        elif callback_data == "credits":
+            await self._show_credits(query)
         elif callback_data == "back_to_main":
             await self._back_to_main_menu(query)
         elif callback_data.startswith("menu_"):
@@ -251,66 +256,13 @@ class Telebot:
         # Get menu specifying meal type
         menu = self.app.get_menu(cafeteria, meal_type)
         meal_name = "Pranzo" if meal_type == "pranzo" else "Cena"
-        menu_text = f"*Menù {meal_name} - {cafeteria}*\n\n{menu}"
+        menu_text = f"🍽️ *Menù {meal_name} - {cafeteria}* 🍽️\n\n{menu}"
         
         await query.edit_message_text(
             menu_text,
             reply_markup=self._get_back_keyboard(),
             parse_mode="Markdown"
         )
-    
-    async def _show_all_menus(self, query):
-        """Show all cafeteria menus"""
-        self.logger.info(f"Showing all menus selection to user {query.from_user.id}")
-        
-        # First, ask which meal type to show
-        keyboard = [
-            [
-                InlineKeyboardButton("🥄 Tutti i menù pranzo", callback_data="all_pranzo"),
-                InlineKeyboardButton("🍽️ Tutti i menù cena", callback_data="all_cena"),
-            ],
-            [
-                InlineKeyboardButton("« Torna al menu principale", callback_data="back_to_main")
-            ]
-        ]
-        
-        await query.edit_message_text(
-            "Seleziona quale tipo di menù vuoi visualizzare:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    
-    async def _show_all_menus_by_type(self, query, meal_type):
-        """Show all cafeteria menus for a specific meal type"""
-        meal_name = "Pranzo" if meal_type == "pranzo" else "Cena"
-        self.logger.info(f"Showing all {meal_name} menus to user {query.from_user.id}")
-        
-        await query.edit_message_text(
-            f"Recupero i menù di {meal_name} per tutte le mense...",
-            reply_markup=None
-        )
-        
-        # Get all cafeteria menus
-        cafeterias = ["Principe Amedeo", "Castelfidardo", "Paolo Borsellino", "Perrone"]
-        
-        # First edit the original message
-        await query.edit_message_text(
-            f"Ecco i menù di {meal_name} per tutte le mense:",
-            reply_markup=self._get_back_keyboard()
-        )
-        
-        # Send each menu as a separate message
-        for cafeteria in cafeterias:
-            menu = self.app.get_menu(cafeteria, meal_type)
-            menu_text = f"{menu}"
-            
-            # Send new message for each menu
-            await query.message.reply_text(
-                menu_text, 
-                parse_mode="Markdown"
-            )
-            
-            # Add a small delay to avoid rate limits
-            await asyncio.sleep(0.5)
     
     async def _update_menus(self, query):
         """Force update menus"""
@@ -365,7 +317,6 @@ class Telebot:
             "Usa i pulsanti qui sotto per interagire con il bot:\n\n"
             "• *Menù Pranzo* - Visualizza i menù di pranzo\n"
             "• *Menù Cena* - Visualizza i menù di cena\n"
-            "• *Tutti i menù* - Visualizza tutti i menù disponibili\n"
             "• *Aggiorna menù* - Forza l'aggiornamento dei menù odierni\n\n"
             "Dopo aver scelto pranzo o cena, potrai selezionare la mensa specifica."
         )
@@ -373,6 +324,23 @@ class Telebot:
         await query.edit_message_text(
             help_text,
             reply_markup=self._get_main_keyboard(),
+            parse_mode="Markdown"
+        )
+    
+    async def _show_credits(self, query):
+        """Show credits information"""
+        credits_text = (
+            "📱 *EDISU Mensa Bot*\n\n"
+            "Developed by Pinguiz:\nhttps://github.com/itsPinguiz\n\n"
+            "🙏 *Special Thanks*:\n"
+            "• Polito RUN\n"
+            "• EDISU Piemonte for sharing menus\n\n"
+            "© 2025 - All Rights Reserved"
+        )
+        
+        await query.edit_message_text(
+            credits_text,
+            reply_markup=self._get_back_keyboard(),
             parse_mode="Markdown"
         )
     
@@ -437,6 +405,10 @@ class Telebot:
     def run(self, debug=False):
         """Start the bot."""
         self.logger.info(f"Starting Telegram bot with polling (debug={debug})")
+        
+        # Store debug mode setting
+        self.debug_mode = debug
+        self.logger.debug(f"Debug mode is {'enabled' if debug else 'disabled'}")
         
         # Use a single event loop for all async operations
         import asyncio

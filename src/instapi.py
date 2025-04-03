@@ -366,14 +366,14 @@ class InstApi:
         # Split the text into lines and remove empty lines
         lines = [line.strip() for line in text.split('\n') if line.strip()]
         
-        # Format the header with cafeteria name and date
+        # Format more concisely - removed redundant emoji header
         from datetime import datetime
         today = datetime.now().strftime("%d/%m/%Y")
         
-        # Create a more elegant header
+        # Create a more concise header
         result_lines = []
-        result_lines.append(f"🍽️ *MENSA {cafeteria.upper()}* 🍽️")
-        result_lines.append(f"*Menù {meal_type.capitalize()} - {today}*")
+        # Add only the date without repeating the cafeteria name which is shown in the UI
+        result_lines.append(f"*{today}*")
         result_lines.append("")  # Empty line after metadata
         
         # Process lines and identify menu sections

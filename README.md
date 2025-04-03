@@ -61,6 +61,5 @@ The bot uses an interactive button-based interface with the following options:
 
 - **Menù Pranzo** - View lunch menus for available cafeterias
 - **Menù Cena** - View dinner menus for available cafeterias
-- **Tutti i menù** - View menus for all cafeterias
 - **Aggiorna menù** - Force update of today's menus
 - **Aiuto** - Show help information
