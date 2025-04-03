@@ -159,9 +159,9 @@ class Telebot:
         self.logger.info(f"Start command received from user {user.id} ({user.username})")
         
         welcome_text = (
-            "Benvenuto nel Bot Mensa Polito!\n\n"
+            "Benvenuto nel Bot Mensa EDISU Torino!\n\n"
             "Questo bot ti permette di consultare i menù delle mense "
-            "universitarie di Polito. Seleziona un'opzione:"
+            "universitarie di Torino. Seleziona un'opzione:"
         )
         
         await update.message.reply_text(
@@ -333,8 +333,8 @@ class Telebot:
             "📱 *EDISU Mensa Bot*\n\n"
             "Developed by Pinguiz:\nhttps://github.com/itsPinguiz\n\n"
             "🙏 *Special Thanks*:\n"
-            "• Polito RUN\n"
-            "• EDISU Piemonte for sharing menus\n\n"
+            "• EDISU Piemonte per la condivisione dei menu\n"
+            "• Università di Torino\n\n"
             "© 2025 - All Rights Reserved"
         )
         
@@ -347,7 +347,7 @@ class Telebot:
     async def _back_to_main_menu(self, query):
         """Return to main menu"""
         await query.edit_message_text(
-            "Menu principale del Bot Mensa Polito.\nSeleziona un'opzione:",
+            "Menu principale del Bot Mensa EDISU Torino.\nSeleziona un'opzione:",
             reply_markup=self._get_main_keyboard()
         )
     

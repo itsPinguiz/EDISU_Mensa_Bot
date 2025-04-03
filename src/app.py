@@ -27,6 +27,11 @@ class App:
         # Set up daily menu fetch
         self.logger.debug("Setting up scheduler")
         self._setup_scheduler()
+        
+        # Initialize console commands (but don't start yet)
+        self.logger.debug("Initializing console commands")
+        from src.console import ConsoleCommands
+        self.console = ConsoleCommands(self)
     
     def _setup_scheduler(self):
         """Set up a scheduler to fetch menus daily"""
@@ -76,9 +81,9 @@ class App:
         
         return menu
     
-    def run(self, debug=False):
+    def run(self, debug=False, enable_console=True):
         """Start the telegram bot"""
-        self.logger.info(f"Starting application with debug={debug}")
+        self.logger.info(f"Starting application with debug={debug}, console={enable_console}")
         
         # Login to Instagram
         self.logger.info("Logging in to Instagram")
@@ -90,16 +95,53 @@ class App:
         self.logger.info("Performing initial menu fetch")
         self.fetch_daily_menus()
         
-        # Run the bot
+        # Start console commands without showing welcome message yet
+        if enable_console:
+            self.console.start(show_welcome=False)
+        
+        # Start Telegram bot 
         self.logger.info("Starting Telegram bot")
-        self.telegram_bot.run(debug)
+        
+        # Start the bot in a separate thread so we can continue execution
+        import threading
+        import time
+        
+        def start_bot():
+            self.telegram_bot.run(debug)
+        
+        bot_thread = threading.Thread(target=start_bot)
+        bot_thread.daemon = True
+        bot_thread.start()
+        
+        # Wait a moment for the bot to initialize
+        time.sleep(3)
+        
+        # Now show the console welcome message and allow command prompt to appear
+        if enable_console:
+            self.console.show_welcome()
+            self.console.signal_ready()  # Signal console to start showing prompts
+            
+        # Keep the main thread alive while the bot is running
+        try:
+            while bot_thread.is_alive():
+                time.sleep(1)
+        except KeyboardInterrupt:
+            self.logger.info("Application stopped by user")
 
 #main 
 if __name__ == "__main__":
+    import argparse
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="PolitoMensa Bot")
+    parser.add_argument("--debug", "-d", action="store_true", help="Enable debug mode")
+    parser.add_argument("--no-console", "-nc", action="store_true", help="Disable console commands")
+    args = parser.parse_args()
+    
     from src.app import App
     from src.instapi import InstApi  
     from src.telebot import Telebot
 
     app = App()
 
-    app.run(debug=True)
+    app.run(debug=args.debug, enable_console=not args.no_console)

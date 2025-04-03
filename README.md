@@ -1,4 +1,4 @@
-# PolitoMensa Bot
+# EDISU Mensa Bot
 
 A Telegram bot that extracts cafeteria menus from Instagram stories and makes them available via an interactive button interface.
 
