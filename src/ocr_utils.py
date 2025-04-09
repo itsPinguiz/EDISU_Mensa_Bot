@@ -7,19 +7,25 @@ import cv2
 import numpy as np
 from src.logger import get_logger
 import platform
+import sys
 
 logger = get_logger("ocr")
 
 # Configure Tesseract path for Windows
 def configure_tesseract():
-    """Configure the Tesseract executable path based on operating system"""
+    """Configure the Tesseract executable path based on operating system with enhanced detection"""
     if platform.system() == "Windows":
-        # Common installation paths on Windows
+        # Expanded list of common installation paths on Windows
         possible_paths = [
             r'C:\Program Files\Tesseract-OCR\tesseract.exe',
             r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
             # Add UB Mannheim default path which is commonly used
             r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+            # Add user profile paths (common location when installed by user)
+            os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Programs', 'Tesseract-OCR', 'tesseract.exe'),
+            os.path.join(os.environ.get('APPDATA', ''), 'Tesseract-OCR', 'tesseract.exe'),
+            # Python environment paths
+            os.path.join(sys.prefix, 'Tesseract-OCR', 'tesseract.exe')
         ]
         
         # Check if any of these paths exist
@@ -29,62 +35,69 @@ def configure_tesseract():
                 pytesseract.pytesseract.tesseract_cmd = path
                 return True
         
-        logger.warning("Could not find Tesseract executable in common locations")
+        # If not found in common locations, try to find in PATH
+        try:
+            import subprocess
+            output = subprocess.check_output(['where', 'tesseract'], shell=True).decode().strip()
+            if output and os.path.isfile(output.splitlines()[0]):
+                path = output.splitlines()[0]
+                logger.info(f"Found Tesseract in PATH: {path}")
+                pytesseract.pytesseract.tesseract_cmd = path
+                return True
+        except (subprocess.SubprocessError, FileNotFoundError):
+            pass
+        
+        logger.warning("Could not find Tesseract executable in common locations or PATH")
         return False
     else:
-        # On Linux/Mac, pytesseract should find it if it's in PATH
-        logger.debug("Non-Windows OS detected, relying on system PATH for Tesseract")
-        return True
+        # On Linux/Mac, also verify it's actually installed
+        try:
+            import subprocess
+            output = subprocess.check_output(['which', 'tesseract']).decode().strip()
+            if output:
+                logger.info(f"Found Tesseract in PATH: {output}")
+                return True
+            return False
+        except (subprocess.SubprocessError, FileNotFoundError):
+            logger.warning("Tesseract not found in PATH on Linux/Mac")
+            return False
 
 # Try to configure Tesseract path on module import
 configure_tesseract()
 
 def preprocess_image(image: Image.Image) -> Image.Image:
-    """
-    Preprocess an image to improve OCR results
-    
-    Args:
-        image: PIL Image object
-        
-    Returns:
-        PIL Image object optimized for OCR
-    """
+    """Enhanced preprocessing for better OCR results"""
     logger.debug("Preprocessing image for OCR")
     
     # Convert to grayscale
     image = image.convert('L')
     
-    # Resize if image is too large (helps OCR accuracy)
+    # Resize for optimal OCR (better results around 300 DPI)
+    scale_factor = 2  # Scale up for better detail
     width, height = image.size
-    max_dimension = 1800
-    if width > max_dimension or height > max_dimension:
-        if width > height:
-            new_width = max_dimension
-            new_height = int(height * (max_dimension / width))
-        else:
-            new_height = max_dimension
-            new_width = int(width * (max_dimension / height))
-        image = image.resize((new_width, new_height), Image.LANCZOS)
-        logger.debug(f"Resized image to {new_width}x{new_height}")
+    new_width = width * scale_factor
+    new_height = height * scale_factor
+    image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
     
-    # Increase contrast
-    enhancer = ImageEnhance.Contrast(image)
-    image = enhancer.enhance(2.0)
-    
-    # Apply sharpening filter
-    image = image.filter(ImageFilter.SHARPEN)
-    
-    # Apply thresholding using OpenCV for better results
+    # Convert to numpy array for OpenCV operations
     img_array = np.array(image)
-    _, thresh = cv2.threshold(img_array, 150, 255, cv2.THRESH_BINARY)
     
-    # Additional denoising for cleaner text
+    # Apply adaptive thresholding
+    thresh = cv2.adaptiveThreshold(
+        img_array, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+        cv2.THRESH_BINARY, 11, 2
+    )
+    
+    # Noise reduction
     denoised = cv2.fastNlMeansDenoising(thresh, None, 10, 7, 21)
     
-    # Convert back to PIL Image
-    processed_image = Image.fromarray(denoised)
+    # Dilation to make text more prominent
+    kernel = np.ones((1,1), np.uint8)
+    dilated = cv2.dilate(denoised, kernel, iterations=1)
     
-    logger.debug("Image preprocessing complete")
+    # Convert back to PIL Image
+    processed_image = Image.fromarray(dilated)
+    
     return processed_image
 
 def extract_text_from_image(image_path: str, lang: str = 'ita') -> str:
@@ -123,34 +136,35 @@ def extract_text_from_image(image_path: str, lang: str = 'ita') -> str:
         return ""
 
 def extract_text_from_image_directly(image: Image.Image, lang: str = 'ita') -> str:
-    """
-    Extract text directly from a PIL Image object using OCR
-    
-    Args:
-        image: PIL Image object
-        lang: Language code for OCR (default: Italian)
-        
-    Returns:
-        Extracted text
-    """
-    logger.debug(f"Extracting text from image using lang={lang}")
+    """Extract text with improved OCR configuration"""
+    logger.debug(f"Extracting text with enhanced OCR settings")
     
     try:
         # Preprocess the image
         processed_image = preprocess_image(image)
         
-        # Extract text using Tesseract
-        # Use a configuration optimized for menu text
-        custom_config = r'--psm 6 --oem 3'  # Assume a uniform text block with OCR engine mode 3
+        # Configure Tesseract for better menu text recognition
+        custom_config = (
+            f'--psm 6 '  # Assume uniform text block
+            f'--oem 3 '  # Use LSTM OCR Engine
+            f'-c tessedit_char_whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,/()- " '
+            f'-c preserve_interword_spaces=1 '
+            f'-c textord_heavy_nr=1 '
+        )
+        
+        # Extract text
         text = pytesseract.image_to_string(processed_image, lang=lang, config=custom_config)
         
+        # Post-processing
+        text = text.replace('|', 'I')
+        text = text.replace('[', '(').replace(']', ')')
+        text = text.replace('{', '(').replace('}', ')')
+        text = text.replace('°', 'o').replace('º', 'o')
+        text = '\n'.join(line.strip() for line in text.split('\n') if line.strip())
+        
         logger.debug(f"Extracted {len(text)} characters from image")
-        
-        # Basic post-processing
-        # Replace common OCR errors
-        text = text.replace('|', 'I').replace('[', '(').replace(']', ')')
-        
         return text
+        
     except Exception as e:
         logger.error(f"Error extracting text from image: {str(e)}", exc_info=True)
         return ""

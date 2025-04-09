@@ -25,19 +25,21 @@ def setup_logger(name="PolitoMensa", log_to_file=True):
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)  # Always collect all logs at the logger level
     
+    # Clear any existing handlers
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    
     # Create formatter
     formatter = logging.Formatter(
         '[%(asctime)s] [%(levelname)s] [%(module)s:%(lineno)d] - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     
-    # Create console handler with level from environment variable
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(get_log_level())  # Use environment variable or default
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+    # Check if we're in main terminal of dual terminal mode
+    is_main_terminal = os.environ.get("POLITOMENSA_MAIN_TERMINAL") == "1"
+    is_single_terminal = os.environ.get("POLITOMENSA_SINGLE_TERMINAL") == "1"
     
-    # Create file handler if requested
+    # Always start with file logging first
     if log_to_file:
         # Ensure logs directory exists
         logs_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
@@ -53,6 +55,13 @@ def setup_logger(name="PolitoMensa", log_to_file=True):
         file_handler.setLevel(logging.DEBUG)  # Log everything to file
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
+    
+    # Only add console handler if not in main terminal of dual terminal mode or if in single terminal mode
+    if not is_main_terminal or is_single_terminal:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(get_log_level())
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
     
     # Prevent logs from being passed to the root logger
     logger.propagate = False

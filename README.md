@@ -46,10 +46,15 @@ This application requires Tesseract OCR to extract menu text from Instagram stor
 
 ## Usage
 
-1. Start the bot:
+1. Start the bot using the module approach:
    ```
-   python -m src.app
+   python -m src
    ```
+
+   Optional command-line arguments:
+   - `--debug` or `-d`: Enable debug mode
+   - `--no-console` or `-nc`: Disable interactive console
+   - `--console-only` or `-co`: Start only the console without other components
 
 2. In Telegram, find your bot and send the `/start` command.
 

@@ -10,3 +10,6 @@ keyring==24.2.0
 opencv-python==4.9.0.80
 numpy==1.26.4
 windows-curses; platform_system=="Windows"
+pyreadline3; platform_system=="Windows"
+colorama==0.4.6
+psutil==5.9.8

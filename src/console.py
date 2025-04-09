@@ -2,46 +2,41 @@ import threading
 import logging
 import os
 import sys
-import platform
-import asyncio
 import time
-from typing import Dict, Callable, List, Any, Optional
-import queue
+import asyncio
+import platform
+from typing import Dict, Callable, List
 from src.logger import get_logger
+import cmd
+from colorama import init, Fore, Back, Style, AnsiToWin32
 
-# Import curses with platform check
-try:
-    import curses
-    from curses import textpad
-    CURSES_AVAILABLE = True
-except ImportError:
-    CURSES_AVAILABLE = False
-    print("Warning: curses module not available. Install with: pip install windows-curses")
+# Initialize colorama correctly - autoreset must be False for fine-grained control
+init(autoreset=False, convert=True, strip=False, wrap=True)
 
-class CursesLogHandler(logging.Handler):
-    """Custom log handler that sends log messages to the curses interface"""
-    def __init__(self, log_queue):
-        super().__init__()
-        self.log_queue = log_queue
-        
-    def emit(self, record):
-        # Format the record and add to the queue for the UI thread to handle
-        log_message = self.format(record)
-        try:
-            self.log_queue.put_nowait(log_message)
-        except queue.Full:
-            # If queue is full, remove oldest message and try again
-            try:
-                self.log_queue.get_nowait()
-                self.log_queue.put_nowait(log_message)
-            except:
-                pass  # If still can't add, just drop the message
+# Ensure ANSI colors work in Windows command prompt/terminal
+if platform.system() == "Windows":
+    import ctypes
+    try:
+        # Enable VT100 terminal processing (ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004)
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_ulong()
+        kernel32.GetConsoleMode(handle, ctypes.byref(mode))
+        mode.value |= 0x0004  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        kernel32.SetConsoleMode(handle, mode)
+    except Exception as e:
+        print(f"Warning: Could not enable VT processing: {e}")
+    
+    # Force colors to work with the "color" command in cmd
+    os.system("")
 
-class ConsoleCommands:
+class ConsoleCommands(cmd.Cmd):
     """
-    Console command system for PolitoMensa using curses for a more interactive UI
+    Simple console command system for PolitoMensa using standard input/output.
+    Streamlined version that only handles commands - logs go to separate terminal.
     """
     def __init__(self, app):
+        super().__init__()
         self.app = app
         self.logger = get_logger()
         self.running = False
@@ -50,10 +45,6 @@ class ConsoleCommands:
         
         # Command history
         self.command_history = []
-        self.history_index = 0
-        
-        # Queue for passing log messages to the UI thread
-        self.log_queue = queue.Queue(maxsize=1000)
         
         # Dictionary mapping command names to their handler functions
         self.commands: Dict[str, Callable] = {
@@ -67,475 +58,153 @@ class ConsoleCommands:
             'restart': self.cmd_restart,
             'quit': self.cmd_quit,
             'exit': self.cmd_quit,
+            'start-updates': self.cmd_start_updates,
+            'stop-updates': self.cmd_stop_updates,
         }
         
-        # Add our custom log handler
-        self._setup_log_handler()
+        self.logger.info("Simple console command system initialized")
+        self.prompt = f"{Fore.GREEN}mensa>{Style.RESET_ALL} "
+        self.intro = None  # Will be set when showing welcome
         
-        self.logger.info("Console command system initialized")
-    
-    def _setup_log_handler(self):
-        """Set up custom log handler to send logs to curses interface"""
-        console_handler = CursesLogHandler(self.log_queue)
-        # Set level to DEBUG to capture more logs in the UI
-        console_handler.setLevel(logging.DEBUG)
-        formatter = logging.Formatter('[%(asctime)s] [%(levelname)s] [%(module)s:%(lineno)d] - %(message)s',
-                                      datefmt='%Y-%m-%d %H:%M:%S')
-        console_handler.setFormatter(formatter)
-        
-        # Add to root logger to catch all messages
-        root_logger = logging.getLogger()
-        root_logger.addHandler(console_handler)
+        # Apply Windows-specific console enhancements
+        if platform.system() == "Windows":
+            # Ensure stdout is properly wrapped
+            sys.stdout = AnsiToWin32(sys.stdout).stream
+            
+            # Enable virtual terminal processing for colors in Windows terminal
+            try:
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+            except:
+                self.logger.warning("Could not enable virtual terminal processing")
     
     def start(self, show_welcome=True):
-        """Start the console command system in curses mode"""
+        """Start the console command system"""
         if self.running:
             self.logger.warning("Console commands already running")
             return
         
-        if not CURSES_AVAILABLE:
-            self.logger.warning("Curses not available - falling back to simple console mode")
-            return self._start_simple_console()
-        
         self.running = True
         self.ready_event.clear()
         
-        # Show simple welcome message
+        # Show welcome message
         if show_welcome:
-            print("\n=== EDISU Mensa Bot Console ===")
-            print("Starting curses interface...")
-            print("Press Ctrl+C to exit if the interface doesn't start properly")
-            print("===============================\n")
-            time.sleep(1)  # Short delay to allow seeing the message
+            self._print_header()
+            print("Type 'help' for available commands")
         
-        # Start the curses interface in the main thread
-        self.command_thread = threading.Thread(target=self._curses_ui_thread)
+        # Start the console thread
+        self.command_thread = threading.Thread(target=self._console_thread)
         self.command_thread.daemon = True
         self.command_thread.start()
         
-        # Signal we're ready
+        # Signal that we're ready for commands
         self.ready_event.set()
     
-    def _start_simple_console(self):
-        """Fall back to simple console mode if curses is not available"""
-        self.logger.warning("Using simple console interface (curses not available)")
-        print("\n=== EDISU Mensa Bot Console Commands (Simple Mode) ===")
-        print("Type 'help' for available commands")
-        print("==================================================\n")
-        
-        # Simple console loop
-        self.running = True
-        self.ready_event.set()
-        
+    def _console_thread(self):
+        """Main console thread that accepts and processes commands"""
         try:
+            self.ready_event.wait()  # Wait until application signals we can show the prompt
+            
+            # Make sure stdout is not redirected 
+            if hasattr(sys.stdout, 'name') and sys.stdout.name == os.devnull:
+                sys.stdout = sys.__stdout__
+                # Re-initialize colorama after restoring stdout
+                init(autoreset=False, convert=True, strip=False, wrap=True)
+                self.logger.debug("Restored stdout for console commands")
+            
+            # Ensure ANSI colors are enabled
+            if platform.system() == "Windows":
+                os.system("")  # This magic command enables ANSI colors in Windows terminal
+                
+            # Show header at startup
+            self._print_header()
+                
             while self.running:
                 try:
-                    command = input("> ").strip()
+                    # Explicitly print prompt with proper styling
+                    sys.stdout.write(f"{Fore.GREEN}mensa>{Style.RESET_ALL} ")
+                    sys.stdout.flush()
+                    
+                    # Get input directly
+                    command = input().strip()
+                    
                     if not command:
                         continue
                     
-                    parts = command.split()
-                    cmd = parts[0].lower()
-                    args = parts[1:] if len(parts) > 1 else []
-                    
-                    if cmd in self.commands:
-                        try:
-                            self.commands[cmd](args)
-                        except Exception as e:
-                            print(f"Error executing command '{cmd}': {str(e)}")
-                            self.logger.error(f"Error executing command '{cmd}': {str(e)}", exc_info=True)
-                    else:
-                        print(f"Unknown command: {cmd}")
-                        print("Type 'help' for available commands")
-                
-                except KeyboardInterrupt:
-                    print("\nUse 'quit' or 'exit' to exit the application")
-                except EOFError:
-                    print("\nUse 'quit' or 'exit' to exit the application")
-        except Exception as e:
-            print(f"Error in command loop: {str(e)}")
-            self.logger.error(f"Error in simple console mode: {str(e)}", exc_info=True)
-    
-    def _curses_ui_thread(self):
-        """Main curses UI thread"""
-        try:
-            # Initialize curses
-            stdscr = curses.initscr()
-            curses.start_color()
-            curses.use_default_colors()
-            curses.curs_set(1)  # Show cursor
-            curses.noecho()  # Don't echo input
-            curses.cbreak()  # React to keys without Enter
-            stdscr.keypad(True)  # Enable special keys
-            
-            # Initialize color pairs
-            curses.init_pair(1, curses.COLOR_WHITE, -1)    # Normal text
-            curses.init_pair(2, curses.COLOR_GREEN, -1)    # Success
-            curses.init_pair(3, curses.COLOR_RED, -1)      # Error
-            curses.init_pair(4, curses.COLOR_YELLOW, -1)   # Warning
-            curses.init_pair(5, curses.COLOR_BLUE, -1)     # Info
-            
-            # Get screen dimensions
-            max_y, max_x = stdscr.getmaxyx()
-            
-            # Create windows
-            # Log window (top part) - Increase log area by making input smaller
-            log_height = max_y - 2  # Increased from max_y - 3
-            log_win = curses.newwin(log_height, max_x, 0, 0)
-            log_win.scrollok(True)
-            log_win.idlok(True)
-            
-            # Title bar at top
-            title_win = curses.newwin(1, max_x, 0, 0)
-            title_win.bkgd(' ', curses.color_pair(5) | curses.A_BOLD)
-            title_text = "EDISU Mensa Bot Console"
-            title_win.addstr(0, (max_x - len(title_text)) // 2, title_text)
-            title_win.refresh()
-            
-            # Command input window (bottom part) - smaller to give more space to logs
-            input_win = curses.newwin(2, max_x, max_y - 2, 0)  # Changed from 3 to 2
-            input_win.border()
-            input_win.addstr(0, 2, " Command ")
-            input_win.refresh()
-            
-            # Text box for input - adjust position due to smaller input area
-            box_win = curses.newwin(1, max_x - 4, max_y - 1, 2)  # Changed position
-            # Store a reference to the input window for other methods to use
-            self._curses_input_window = box_win
-            box_win.refresh()
-            
-            # List to store log messages for scrolling
-            log_messages = []
-            
-            # Redraw the current view
-            def redraw_log_window():
-                log_win.clear()
-                visible_lines = log_height - 1  # Reserve one line for the title
-                
-                # Add logging indicator in title bar to show activity
-                log_count = len(log_messages)
-                title_win.clear()
-                title_win.bkgd(' ', curses.color_pair(5) | curses.A_BOLD)
-                status_text = f"EDISU Mensa Bot Console - {log_count} log messages"
-                title_win.addstr(0, (max_x - len(status_text)) // 2, status_text)
-                title_win.refresh()
-                
-                # If no logs yet, show a helpful message
-                if not log_messages:
-                    log_win.addstr(2, 2, "Waiting for logs... Bot activity will appear here.", 
-                                  curses.color_pair(4))
-                    log_win.refresh()
-                    return
-                
-                # Show more recent logs (scroll to bottom automatically)
-                start_idx = max(0, len(log_messages) - visible_lines)
-                for i, msg in enumerate(log_messages[start_idx:start_idx + visible_lines]):
-                    try:
-                        # Truncate long messages to fit window width
-                        if len(msg) > max_x - 2:
-                            msg = msg[:max_x - 5] + "..."
-                            
-                        # Colorize based on log level
-                        color = curses.color_pair(1)  # Default: white
-                        if "ERROR" in msg:
-                            color = curses.color_pair(3)  # Red
-                        elif "WARNING" in msg:
-                            color = curses.color_pair(4)  # Yellow
-                        elif "INFO" in msg:
-                            color = curses.color_pair(5)  # Blue
-                        elif "DEBUG" in msg:
-                            color = curses.color_pair(5)  # Blue
-                        
-                        log_win.addstr(i + 1, 1, msg, color)  # +1 to leave space for title
-                    except curses.error:
-                        # Handle edge cases (like writing to bottom-right corner)
-                        pass
-                log_win.refresh()
-            
-            # First display
-            redraw_log_window()
-            
-            # Create an instance of OutputCapture for reuse
-            output_capture = self.OutputCapture(log_messages)
-            
-            # Command processing function for the textbox
-            def process_command(text):
-                text = text.strip()
-                if not text:
-                    return
-                
-                # Add to history
-                self.command_history.append(text)
-                if len(self.command_history) > 50:  # Limit history size
-                    self.command_history = self.command_history[-50:]
-                self.history_index = len(self.command_history)
-                
-                # Parse and execute command
-                parts = text.split()
-                cmd = parts[0].lower()
-                args = parts[1:] if len(parts) > 1 else []
-                
-                # Capture command output
-                old_stdout = sys.stdout
-                # Use the pre-created instance of OutputCapture
-                sys.stdout = output_capture
-                
-                try:
-                    if cmd in self.commands:
-                        try:
-                            # Log the command
-                            log_messages.append(f"> {text}")
-                            self.commands[cmd](args)
-                        except Exception as e:
-                            log_messages.append(f"Error executing command '{cmd}': {str(e)}")
-                            self.logger.error(f"Error executing command '{cmd}': {str(e)}", exc_info=True)
-                    else:
-                        log_messages.append(f"Unknown command: {cmd}")
-                        log_messages.append("Type 'help' for available commands")
-                finally:
-                    # Restore stdout
-                    sys.stdout = old_stdout
-                    redraw_log_window()
-            
-            # Set up terminal resize handler
-            def handle_resize():
-                # Get new dimensions
-                new_y, new_x = stdscr.getmaxyx()
-                
-                # Resize and reposition windows - adjust for new smaller input area
-                log_win.resize(new_y - 2, new_x)  # Changed from new_y - 3
-                title_win.resize(1, new_x)
-                title_win.mvwin(0, 0)
-                input_win.resize(2, new_x)  # Changed from 3
-                input_win.mvwin(new_y - 2, 0)  # Changed position
-                box_win.resize(1, new_x - 4)
-                box_win.mvwin(new_y - 1, 2)  # Changed position
-                
-                # Update title
-                title_win.clear()
-                title_win.bkgd(' ', curses.color_pair(5) | curses.A_BOLD)
-                title_win.addstr(0, (new_x - len(title_text)) // 2, title_text)
-                
-                # Redraw everything
-                redraw_log_window()
-                input_win.border()
-                input_win.addstr(0, 2, " Command ")
-                
-                # Refresh all windows
-                title_win.refresh()
-                input_win.refresh()
-                box_win.refresh()
-            
-            # Main input loop
-            while self.running:
-                try:
-                    # Check for terminal resize
-                    current_y, current_x = stdscr.getmaxyx()
-                    if current_y != max_y or current_x != max_x:
-                        max_y, max_x = current_y, current_x
-                        handle_resize()
-                        
-                    # Process any pending log messages - increase priority of log processing
-                    log_processed = False
-                    while not self.log_queue.empty():
-                        try:
-                            log_message = self.log_queue.get_nowait()
-                            log_messages.append(log_message)
-                            log_processed = True
-                        except queue.Empty:
-                            break
-                    
-                    # Only redraw if we actually got new logs
-                    if log_processed:
-                        redraw_log_window()
-                    
-                    # Show prompt
-                    box_win.clear()
-                    box_win.refresh()
-                    
-                    # Get command with custom input handling
-                    command = self._custom_input(box_win, max_x - 5)
-                    
                     # Process the command
-                    if command is not None:
-                        process_command(command)
+                    self._process_command(command)
                     
-                    # Redraw after command execution
-                    redraw_log_window()
-                    input_win.border()
-                    input_win.addstr(0, 2, " Command ")
-                    input_win.refresh()
-                except curses.error:
-                    # Handle curses errors, most likely from resize events
-                    try:
-                        max_y, max_x = stdscr.getmaxyx()
-                        handle_resize()
-                    except:
-                        pass
-        
+                except EOFError:
+                    # Ctrl+D pressed
+                    print("\nUse 'quit' or 'exit' to exit.")
+                except KeyboardInterrupt:
+                    # Ctrl+C pressed
+                    print("\nInterrupted. Use 'quit' or 'exit' to exit.")
+                except Exception as e:
+                    self.logger.error(f"Error in console thread: {str(e)}", exc_info=True)
+                    print(f"Error: {str(e)}")
         except Exception as e:
-            self.logger.error(f"Error in curses UI: {str(e)}", exc_info=True)
-        finally:
-            # Clean up curses
-            if 'stdscr' in locals():
+            self.logger.error(f"Error in console main loop: {str(e)}", exc_info=True)
+    
+    def _process_command(self, command_text):
+        """Process a command entered by the user"""
+        if not command_text:
+            return
+            
+        # Add to history
+        self.command_history.append(command_text)
+        if len(self.command_history) > 50:
+            self.command_history = self.command_history[-50:]
+        
+        # Parse command
+        parts = command_text.split()
+        if not parts:
+            return
+            
+        cmd = parts[0].lower()
+        args = parts[1:] if len(parts) > 1 else []
+        
+        try:
+            # Execute the command if it exists
+            if cmd in self.commands:
                 try:
-                    # Reset the terminal to normal state
-                    stdscr.keypad(False)
-                    curses.nocbreak()
-                    curses.echo()
-                    curses.endwin()
-                except:
-                    # In case cleanup fails
-                    pass
-                    
-            # Remove reference to prevent other methods from using it after cleanup
-            if hasattr(self, '_curses_input_window'):
-                delattr(self, '_curses_input_window')
-
-    def _custom_input(self, win, width):
-        """Custom input handler that supports command history and other special keys"""
-        buffer = ""
-        cursor_pos = 0
-        history_index = len(self.command_history)
-        
-        def redraw_input():
-            win.clear()
-            # Handle case where buffer is longer than width
-            if len(buffer) >= width:
-                # Show portion of buffer around cursor
-                display_start = max(0, cursor_pos - width//2)
-                display_end = min(len(buffer), display_start + width)
-                display_text = buffer[display_start:display_end]
-                
-                # Adjust cursor position for display
-                adjusted_cursor = cursor_pos - display_start
-                
-                win.addstr(0, 0, display_text)
-                win.move(0, adjusted_cursor)
+                    # Execute command
+                    self.commands[cmd](args)
+                except Exception as e:
+                    print(f"Error executing command '{cmd}': {str(e)}")
+                    self.logger.error(f"Error executing command '{cmd}': {str(e)}", exc_info=True)
             else:
-                win.addstr(0, 0, buffer)
-                win.move(0, cursor_pos)
-            win.refresh()
-        
-        while True:
-            redraw_input()
-            
-            try:
-                key = win.getch()
-                
-                if key == ord('\n') or key == curses.KEY_ENTER:
-                    # Enter key - submit command
-                    return buffer
-                
-                elif key == curses.KEY_BACKSPACE or key == 127 or key == 8:
-                    # Backspace - delete character before cursor
-                    if cursor_pos > 0:
-                        buffer = buffer[:cursor_pos-1] + buffer[cursor_pos:]
-                        cursor_pos -= 1
-                
-                elif key == curses.KEY_DC:
-                    # Delete key - delete character at cursor
-                    if cursor_pos < len(buffer):
-                        buffer = buffer[:cursor_pos] + buffer[cursor_pos+1:]
-                
-                elif key == curses.KEY_LEFT:
-                    # Move cursor left
-                    if cursor_pos > 0:
-                        cursor_pos -= 1
-                
-                elif key == curses.KEY_RIGHT:
-                    # Move cursor right
-                    if cursor_pos < len(buffer):
-                        cursor_pos += 1
-                
-                elif key == curses.KEY_HOME:
-                    # Move to start of line
-                    cursor_pos = 0
-                
-                elif key == curses.KEY_END:
-                    # Move to end of line
-                    cursor_pos = len(buffer)
-                
-                elif key == curses.KEY_UP:
-                    # Previous command in history
-                    if self.command_history and history_index > 0:
-                        history_index -= 1
-                        buffer = self.command_history[history_index]
-                        cursor_pos = len(buffer)
-                
-                elif key == curses.KEY_DOWN:
-                    # Next command in history
-                    if history_index < len(self.command_history) - 1:
-                        history_index += 1
-                        buffer = self.command_history[history_index]
-                        cursor_pos = len(buffer)
-                    elif history_index == len(self.command_history) - 1:
-                        # At end of history, clear buffer
-                        history_index = len(self.command_history)
-                        buffer = ""
-                        cursor_pos = 0
-                
-                elif key == 27:  # ESC
-                    # Cancel input
-                    return None
-                
-                elif key in (3, 4):  # Ctrl+C or Ctrl+D
-                    # Handle exit keys
-                    if key == 3:  # Ctrl+C
-                        self.running = False
-                        return "quit"
-                    return None
-                
-                elif 32 <= key <= 126:  # Printable ASCII characters
-                    # Insert character at cursor position
-                    buffer = buffer[:cursor_pos] + chr(key) + buffer[cursor_pos:]
-                    cursor_pos += 1
-            
-            except Exception as e:
-                self.logger.error(f"Error in custom input handler: {str(e)}", exc_info=True)
-                return None
-
+                print(f"Unknown command: {cmd}")
+                print("Type 'help' for available commands")
+        except Exception as e:
+            self.logger.error(f"Unexpected error processing command: {str(e)}", exc_info=True)
+            print(f"Error: {str(e)}")
+    
     def signal_ready(self):
         """Signal that the console should start showing prompts"""
         self.ready_event.set()
-
-    def show_welcome(self):
-        """Display the welcome message (handled in start method)"""
-        pass
     
     def stop(self):
-        """Stop the console command input loop"""
+        """Stop the console command system"""
         self.running = False
         if self.command_thread and self.command_thread.is_alive():
             self.logger.info("Stopping console command system")
     
-    # Output capture class for command output
-    class OutputCapture:
-        def __init__(self, log_messages):
-            self.log_messages = log_messages
-        
-        def write(self, text):
-            if text.strip():  # Skip empty lines
-                for line in text.splitlines():
-                    if line.strip():
-                        self.log_messages.append(line.rstrip())
-        
-        def flush(self):
-            pass
-    
-    # Command handlers
     def cmd_help(self, args: List[str]) -> None:
         """Display help information about available commands"""
         print("\n=== Available Commands ===")
-        print("help       - Show this help message")
-        print("status     - Show application status")
-        print("update     - Force update of menus")
-        print("log LEVEL  - Change logging level (DEBUG, INFO, WARNING, ERROR)")
-        print("cafeterias - List available cafeterias")
-        print("menu CAFE  - Show menu for a cafeteria")
-        print("notify MSG - Send notification to all active chats")
-        print("restart    - Restart the Telegram bot")
-        print("quit/exit  - Exit the application")
+        print("help          - Show this help message")
+        print("status        - Show application status")
+        print("update        - Force update of menus")
+        print("start-updates - Enable scheduled menu updates")
+        print("stop-updates  - Disable scheduled menu updates")
+        print("log LEVEL     - Change logging level (DEBUG, INFO, WARNING, ERROR)")
+        print("cafeterias    - List available cafeterias")
+        print("menu CAFE     - Show menu for a cafeteria")
+        print("notify MSG    - Send notification to all active chats")
+        print("restart       - Restart the Telegram bot")
+        print("quit/exit     - Exit the application")
         print("========================\n")
 
     def cmd_status(self, args: List[str]) -> None:
@@ -549,18 +218,21 @@ class ConsoleCommands:
                       for meal_type in cafeteria.values() 
                       if meal_type and "not available" not in meal_type)
         
+        # Get active chats information
+        active_chats_count = 0
+        if hasattr(self.app, 'telegram_bot') and hasattr(self.app.telegram_bot, 'active_chats'):
+            active_chats_count = len(self.app.telegram_bot.active_chats)
+        
         print("\n=== Application Status ===")
         print(f"Instagram: {instagram_status}")
         print(f"Telegram: {telegram_status}")
+        print(f"Active Telegram chats: {active_chats_count}")
         print(f"Cafeterias: {num_cafeterias}")
         print(f"Active menus: {num_menus}")
         
         # Show current logging level
         current_level = logging.getLevelName(self.logger.level)
-        console_level = logging.getLevelName(self.logger.handlers[0].level)
-        file_level = logging.getLevelName(self.logger.handlers[1].level) if len(self.logger.handlers) > 1 else "N/A"
-        
-        print(f"Logging level: {current_level} (Console: {console_level}, File: {file_level})")
+        print(f"Logging level: {current_level}")
         print("=========================\n")
 
     def cmd_update(self, args: List[str]) -> None:
@@ -586,7 +258,7 @@ class ConsoleCommands:
     def cmd_log(self, args: List[str]) -> None:
         """Change the logging level"""
         if not args:
-            print("Current log level: " + logging.getLevelName(self.logger.handlers[0].level))
+            print("Current log level: " + logging.getLevelName(self.logger.level))
             print("Usage: log LEVEL")
             print("Example: log DEBUG")
             print("Levels: DEBUG, INFO, WARNING, ERROR, CRITICAL")
@@ -598,16 +270,13 @@ class ConsoleCommands:
             # Get the numeric level from the name
             level = getattr(logging, level_name)
             
-            # Set the level for the console handler (usually the first handler)
-            if self.logger.handlers:
-                self.logger.handlers[0].setLevel(level)
-                print(f"✅ Console logging level set to {level_name}")
-                
-                # Also set environment variable for future runs
-                os.environ["POLITOMENSA_LOG_LEVEL"] = level_name
-                print(f"✅ POLITOMENSA_LOG_LEVEL environment variable set to {level_name}")
-            else:
-                print("❌ No handlers found for logger")
+            # Set the level for the logger
+            self.logger.setLevel(level)
+            print(f"✅ Logging level set to {level_name}")
+            
+            # Also set environment variable for future runs
+            os.environ["POLITOMENSA_LOG_LEVEL"] = level_name
+            print(f"✅ POLITOMENSA_LOG_LEVEL environment variable set to {level_name}")
         except AttributeError:
             print(f"❌ Invalid log level: {level_name}")
             print("Valid levels: DEBUG, INFO, WARNING, ERROR, CRITICAL")
@@ -668,14 +337,7 @@ class ConsoleCommands:
         print(f"⚠️ You are about to send the following message to all active chats:")
         print(f"\n\"{message}\"\n")
         
-        # Ask for confirmation in a curses-compatible way
-        if CURSES_AVAILABLE and self.command_thread and self.command_thread.is_alive():
-            print("Are you sure you want to send this message?")
-            print("Type 'y' or 'yes' to confirm, anything else to cancel.")
-            confirmation = self._get_simple_input().lower()
-        else:
-            # Standard input for non-curses mode
-            confirmation = input("Are you sure you want to send this message? (y/n): ").lower()
+        confirmation = input("Are you sure you want to send this message? (y/n): ").lower()
         
         if confirmation != 'y' and confirmation != 'yes':
             print("Message sending cancelled.")
@@ -695,14 +357,7 @@ class ConsoleCommands:
         """Restart the Telegram bot"""
         print("Restarting Telegram bot...")
         
-        # Ask for confirmation in a curses-compatible way
-        if CURSES_AVAILABLE and self.command_thread and self.command_thread.is_alive():
-            print("Are you sure you want to restart the bot? Active users will be disconnected.")
-            print("Type 'y' or 'yes' to confirm, anything else to cancel.")
-            confirmation = self._get_simple_input().lower()
-        else:
-            # Standard input for non-curses mode
-            confirmation = input("Are you sure you want to restart the bot? Active users will be disconnected. (y/n): ").lower()
+        confirmation = input("Are you sure you want to restart the bot? Active users will be disconnected. (y/n): ").lower()
         
         if confirmation != 'y' and confirmation != 'yes':
             print("Restart cancelled.")
@@ -722,17 +377,6 @@ class ConsoleCommands:
         except Exception as e:
             print(f"❌ Error initiating restart: {str(e)}")
             self.logger.error(f"Error during restart: {str(e)}", exc_info=True)
-
-    def _get_simple_input(self):
-        """Get simple text input in a curses-compatible way"""
-        # Use the same custom input handler we use for commands
-        if hasattr(self, '_curses_input_window') and self._curses_input_window:
-            # If we already have a reference to the input window, use it
-            return self._custom_input(self._curses_input_window, 20) or ""
-        else:
-            # Otherwise print a prompt and wait for manual input
-            print("Enter response: ", end='', flush=True)
-            return input()
 
     def _perform_restart(self):
         """Execute the actual restart process in a separate thread"""
@@ -812,3 +456,244 @@ class ConsoleCommands:
         """Exit the application after a short delay"""
         time.sleep(0.5)  # Short delay to let the command finish
         os._exit(0)  # Force exit
+    
+    def cmd_start_updates(self, args: List[str]) -> None:
+        """Start menu updates (enable scheduler)"""
+        if hasattr(self.app, 'update_enabled'):
+            if self.app.update_enabled.is_set():
+                print("✅ Menu updates are already enabled")
+            else:
+                self.app.update_enabled.set()
+                print("✅ Menu updates have been enabled")
+                self.logger.info("Menu updates enabled via console command")
+        else:
+            print("❌ Update control not available")
+        
+    def cmd_stop_updates(self, args: List[str]) -> None:
+        """Stop menu updates (disable scheduler)"""
+        if hasattr(self.app, 'update_enabled'):
+            if not self.app.update_enabled.is_set():
+                print("ℹ️ Menu updates are already disabled")
+            else:
+                self.app.update_enabled.clear()
+                print("✅ Menu updates have been disabled")
+                self.logger.info("Menu updates disabled via console command")
+        else:
+            print("❌ Update control not available")
+
+    def _print_header(self):
+        """Print a styled header"""
+        os.system('cls' if os.name == 'nt' else 'clear')
+        
+        # Use explicit writes with flush to ensure proper display
+        sys.stdout.write(f"{Fore.CYAN}╔════════════════════════════════════════╗\n")
+        sys.stdout.write(f"{Fore.CYAN}║  {Fore.WHITE}{Style.BRIGHT}PolitoMensa Console Interface v1.0{Style.NORMAL}{Fore.CYAN}    ║\n")
+        sys.stdout.write(f"{Fore.CYAN}╚════════════════════════════════════════╝{Style.RESET_ALL}\n")
+        sys.stdout.flush()
+
+    def _print_status(self, status: str, color: str = Fore.WHITE):
+        """Print a status message with color"""
+        print(f"{color}[*] {status}{Style.RESET_ALL}", flush=True)
+
+    def _print_error(self, error: str):
+        """Print an error message"""
+        print(f"{Fore.RED}[!] Error: {error}{Style.RESET_ALL}", flush=True)
+
+    def _print_success(self, message: str):
+        """Print a success message"""
+        print(f"{Fore.GREEN}[+] {message}{Style.RESET_ALL}", flush=True)
+
+    def signal_ready(self):
+        """Signal that the application is ready for commands"""
+        self.ready_event.set()
+
+    def preloop(self):
+        """Setup before starting the command loop"""
+        if self.intro:
+            self._print_header()
+            # Print intro line by line with explicit resets
+            for line in self.intro.split('\n'):
+                if line:
+                    print(line, flush=True)
+        self.ready_event.wait()
+
+    def emptyline(self):
+        """Do nothing on empty line"""
+        pass
+
+    def do_status(self, arg):
+        """Show current bot status"""
+        if not hasattr(self.app, 'update_enabled'):
+            self._print_error("Update status not available")
+            return
+
+        status = "ENABLED" if self.app.update_enabled.is_set() else "DISABLED"
+        status_color = Fore.GREEN if status == "ENABLED" else Fore.RED
+        
+        print(f"\n{Fore.CYAN}╔══════════════════════════════╗")
+        print(f"{Fore.CYAN}║       System Status          ║")
+        print(f"{Fore.CYAN}╠══════════════════════════════╣")
+        print(f"{Fore.CYAN}║{Style.RESET_ALL} Updates: {status_color}{status:<14}{Style.RESET_ALL}{Fore.CYAN} ║")
+        print(f"{Fore.CYAN}║{Style.RESET_ALL} Demo Mode: {Fore.YELLOW}{str(self.app.demo_mode):<13}{Style.RESET_ALL}{Fore.CYAN} ║")
+        print(f"{Fore.CYAN}╚══════════════════════════════╝{Style.RESET_ALL}\n")
+
+    def do_enable(self, arg):
+        """Enable menu updates"""
+        if hasattr(self.app, 'update_enabled'):
+            self.app.update_enabled.set()
+            self._print_success("Menu updates enabled")
+        else:
+            self._print_error("Update control not available")
+
+    def do_disable(self, arg):
+        """Disable menu updates"""
+        if hasattr(self.app, 'update_enabled'):
+            self.app.update_enabled.clear()
+            self._print_success("Menu updates disabled")
+        else:
+            self._print_error("Update control not available")
+
+    def do_fetch(self, arg):
+        """Force fetch menus now"""
+        try:
+            self._print_status("Fetching menus...", Fore.CYAN)
+            menus = self.app.fetch_daily_menus()
+            if menus:
+                self._print_success(f"Successfully fetched menus for {len(menus)} cafeterias")
+                for cafeteria in menus:
+                    print(f"{Fore.CYAN}  • {cafeteria}{Style.RESET_ALL}", flush=True)
+            else:
+                self._print_error("No menus were fetched")
+        except Exception as e:
+            self._print_error(f"Failed to fetch menus: {str(e)}")
+
+    def do_show(self, arg):
+        """Show menu for a specific cafeteria: show <cafeteria_name> [pranzo|cena]"""
+        args = arg.split()
+        if not args:
+            self._print_error("Please specify a cafeteria name")
+            return
+
+        cafeteria = args[0]
+        meal_type = args[1] if len(args) > 1 else "pranzo"
+
+        try:
+            menu = self.app.get_menu(cafeteria, meal_type)
+            print(f"\n{Fore.CYAN}=== Menu for {cafeteria} ({meal_type}) ==={Style.RESET_ALL}")
+            print(f"{Fore.WHITE}{menu}{Style.RESET_ALL}", flush=True)
+        except Exception as e:
+            self._print_error(f"Failed to get menu: {str(e)}")
+
+    def do_list(self, arg):
+        """List all available cafeterias"""
+        print(f"\n{Fore.CYAN}╔═══════════════════════════════════════╗")
+        print(f"{Fore.CYAN}║         Available Cafeterias           ║")
+        print(f"{Fore.CYAN}╠═══════════════════════════════════════╣{Style.RESET_ALL}")
+        
+        for i, cafe in enumerate(self.app.instagram.cafeterias, 1):
+            print(f"{Fore.CYAN}║{Style.RESET_ALL}  {Fore.YELLOW}{i}.{Style.RESET_ALL} {Fore.WHITE}{cafe:<30}{Fore.CYAN}║{Style.RESET_ALL}")
+        
+        print(f"{Fore.CYAN}╚═══════════════════════════════════════╝{Style.RESET_ALL}\n")
+
+    def do_exit(self, arg):
+        """Exit the console"""
+        self._print_status("Shutting down...", Fore.YELLOW)
+        self.running = False
+        return True
+
+    def do_clear(self, arg):
+        """Clear the console screen"""
+        self._print_header()
+        return False
+
+    def default(self, line):
+        """Handle unknown commands"""
+        self._print_error(f"Unknown command: {line}")
+        print(f"Type {Fore.CYAN}help{Style.RESET_ALL} for a list of commands", flush=True)
+
+    def do_help(self, arg):
+        """Show help information with styled output"""
+        self._print_header()
+        
+        print(f"\n{Fore.CYAN}╔══════════════════════════════════════════╗")
+        print(f"{Fore.CYAN}║          Available Commands               ║")
+        print(f"{Fore.CYAN}╠══════════════════════════════════════════╣{Style.RESET_ALL}")
+        
+        commands = [
+            ("help", "Show this help message"),
+            ("status", "Show application status"),
+            ("update", "Force update of menus"),
+            ("start-updates", "Enable scheduled menu updates"),
+            ("stop-updates", "Disable scheduled menu updates"),
+            ("log LEVEL", "Change logging level (DEBUG, INFO, WARNING, ERROR)"),
+            ("cafeterias", "List available cafeterias"),
+            ("menu CAFE", "Show menu for a cafeteria"),
+            ("notify MSG", "Send notification to all active chats"),
+            ("restart", "Restart the Telegram bot"),
+            ("quit/exit", "Exit the application")
+        ]
+        
+        # Calculate padding for alignment
+        max_cmd_length = max(len(cmd[0]) for cmd in commands)
+        
+        for cmd, desc in commands:
+            print(f"{Fore.CYAN}║{Style.RESET_ALL} {Fore.YELLOW}{cmd:<{max_cmd_length}}{Style.RESET_ALL} - {Fore.WHITE}{desc}{' ' * (37-len(desc))}{Fore.CYAN}║{Style.RESET_ALL}")
+        
+        print(f"{Fore.CYAN}╚══════════════════════════════════════════╝{Style.RESET_ALL}")
+        print()
+
+    def do_status(self, arg):
+        """Show application status with styled output"""
+        print(f"\n{Fore.CYAN}╔══════════════════════════════════════════╗")
+        print(f"{Fore.CYAN}║            System Status                 ║")
+        print(f"{Fore.CYAN}╠══════════════════════════════════════════╣{Style.RESET_ALL}")
+        
+        # Instagram Status
+        insta_status = "Logged in" if self.app.instagram.logged_in else "Not logged in"
+        insta_color = Fore.GREEN if self.app.instagram.logged_in else Fore.RED
+        print(f"{Fore.CYAN}║{Style.RESET_ALL} Instagram: {insta_color}{insta_status:<27}{Fore.CYAN}║{Style.RESET_ALL}")
+        
+        # Telegram Status
+        telegram_status = "Running" if hasattr(self.app.telegram_bot, 'application') else "Not running"
+        telegram_color = Fore.GREEN if telegram_status == "Running" else Fore.RED
+        print(f"{Fore.CYAN}║{Style.RESET_ALL} Telegram: {telegram_color}{telegram_status:<28}{Fore.CYAN}║{Style.RESET_ALL}")
+        
+        # Active chats
+        chat_count = len(self.app.telegram_bot.active_chats) if hasattr(self.app.telegram_bot, 'active_chats') else 0
+        print(f"{Fore.CYAN}║{Style.RESET_ALL} Active chats: {Fore.YELLOW}{chat_count:<25}{Fore.CYAN}║{Style.RESET_ALL}")
+        
+        # Cafeteria count
+        cafe_count = len(self.app.instagram.cafeterias)
+        print(f"{Fore.CYAN}║{Style.RESET_ALL} Cafeterias: {Fore.YELLOW}{cafe_count:<27}{Fore.CYAN}║{Style.RESET_ALL}")
+        
+        # Menu count
+        menu_count = sum(1 for cafe in self.app.menus.values() for meal in cafe.values() if meal)
+        print(f"{Fore.CYAN}║{Style.RESET_ALL} Active menus: {Fore.YELLOW}{menu_count:<25}{Fore.CYAN}║{Style.RESET_ALL}")
+        
+        # Logging level
+        log_level = logging.getLogger().getEffectiveLevel()
+        level_name = logging.getLevelName(log_level)
+        level_color = {
+            'DEBUG': Fore.MAGENTA,
+            'INFO': Fore.GREEN,
+            'WARNING': Fore.YELLOW,
+            'ERROR': Fore.RED
+        }.get(level_name, Fore.WHITE)
+        print(f"{Fore.CYAN}║{Style.RESET_ALL} Log level: {level_color}{level_name:<27}{Fore.CYAN}║{Style.RESET_ALL}")
+        
+        # Updates status
+        updates_status = "Enabled" if self.app.update_enabled.is_set() else "Disabled"
+        updates_color = Fore.GREEN if updates_status == "Enabled" else Fore.RED
+        print(f"{Fore.CYAN}║{Style.RESET_ALL} Updates: {updates_color}{updates_status:<29}{Fore.CYAN}║{Style.RESET_ALL}")
+        
+        print(f"{Fore.CYAN}╚══════════════════════════════════════════╝{Style.RESET_ALL}")
+        print()
+
+    def emptyline(self):
+        """Handle empty line input"""
+        self._print_status("Type a command or 'help' for available commands", Fore.CYAN)
+
+    # Command shortcuts
+    do_quit = do_exit
+    do_EOF = do_exit
+
